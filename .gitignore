@@ -1,0 +1,20 @@
+node_modules
+.next
+out
+build
+.DS_Store
+*.pem
+npm-debug.log*
+.env
+.env*.local
+.vercel
+next-env.d.ts
+*.tsbuildinfo
+.env*
+!.env.example
+
+# Google OAuth client secret (never commit)
+client_secret_*.json
+
+# IDE
+.idea

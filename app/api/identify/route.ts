@@ -12,12 +12,20 @@ export const maxDuration = 60;
  *  - otherwise → Google Gemini (free). `model` may pick a specific Gemini model;
  *    only gemini-* names are accepted (fallback to the default otherwise).
  */
-function pickModel(provider: string, model?: string): LanguageModel {
+const GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.7-flash"];
+
+/**
+ * Ordered list of models to try: the requested one first, then the other
+ * Gemini models as fallbacks (e.g. when one returns "high demand" / 503).
+ */
+function pickModels(provider: string, model?: string): { id: string; model: LanguageModel }[] {
   if (provider === "claude") {
-    return (process.env.AI_GATEWAY_MODEL || "anthropic/claude-sonnet-4.5") as LanguageModel;
+    const id = process.env.AI_GATEWAY_MODEL || "anthropic/claude-sonnet-4.5";
+    return [{ id, model: id as LanguageModel }];
   }
-  const safe = model && /^gemini-[a-z0-9.\-]+$/i.test(model) ? model : "gemini-3.8-flash";
-  return google(safe);
+  const safe = model && /^gemini-[a-z0-9.\-]+$/i.test(model) ? model : GEMINI_MODELS[0];
+  const ids = [safe, ...GEMINI_MODELS.filter((m) => m !== safe)];
+  return ids.map((id) => ({ id, model: google(id) }));
 }
 
 function buildPrompt(known: string[]): string {
@@ -61,23 +69,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "no_image" }, { status: 400 });
   }
 
-  try {
-    const { text } = await generateText({
-      model: pickModel(provider, model),
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: buildPrompt(known) },
-            { type: "image", image },
-          ],
-        },
-      ],
-    });
-    const name = (text || "").trim().replace(/^["'.\s]+|["'.\s]+$/g, "");
-    return NextResponse.json({ name });
-  } catch (e) {
-    console.error("[identify]", e);
-    return NextResponse.json({ error: String(e) }, { status: 502 });
+  let lastError: unknown;
+  for (const m of pickModels(provider, model)) {
+    try {
+      const { text } = await generateText({
+        model: m.model,
+        maxRetries: 1, // fail fast on an overloaded model, then try the next
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: buildPrompt(known) },
+              { type: "image", image },
+            ],
+          },
+        ],
+      });
+      const name = (text || "").trim().replace(/^["'.\s]+|["'.\s]+$/g, "");
+      return NextResponse.json({ name, model: m.id });
+    } catch (e) {
+      console.error(`[identify] ${m.id}`, e);
+      lastError = e;
+    }
   }
+  return NextResponse.json({ error: String(lastError) }, { status: 502 });
 }

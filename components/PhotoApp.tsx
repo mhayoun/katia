@@ -168,6 +168,75 @@ function persistEdit(name: string, species: string, context: string) {
   }
 }
 
+// Grouping operations not yet written to Drive (per project), replayed after a
+// refresh and committed by « 💾 Save ».
+const PENDING_KEY = "katia_pending_v1";
+type PendingOp =
+  | { type: "name"; ids: string[]; species: string }
+  | {
+      type: "move";
+      items: { id: string; driveId?: string }[];
+      targetId: string;
+      targetName: string;
+    };
+function loadPending(project: string): PendingOp[] {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    return Array.isArray(all[project]) ? all[project] : [];
+  } catch {
+    return [];
+  }
+}
+function storePending(project: string, ops: PendingOp[]) {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    const all = raw ? JSON.parse(raw) : {};
+    if (ops.length) all[project] = ops;
+    else delete all[project];
+    localStorage.setItem(PENDING_KEY, JSON.stringify(all));
+  } catch {
+    /* storage unavailable — ignore */
+  }
+}
+
+/**
+ * Replay pending grouping ops onto freshly loaded photos (mutates in place):
+ * names are re-applied and moved photos get their new album/id.
+ */
+function replayPending(
+  ops: PendingOp[],
+  list: Photo[],
+  sp: Map<string, string>,
+  ctx: Map<string, string>,
+) {
+  for (const op of ops) {
+    if (op.type === "name") {
+      const have = new Set(list.map((p) => p.id));
+      for (const id of op.ids) if (have.has(id)) sp.set(id, op.species);
+      continue;
+    }
+    for (const it of op.items) {
+      const i = list.findIndex((p) => (it.driveId ? p.driveId === it.driveId : p.id === it.id));
+      if (i < 0) continue;
+      const p = list[i];
+      const nid = `${op.targetName}/${p.name}`;
+      if (nid === p.id) continue;
+      list[i] = { ...p, album: op.targetName, id: nid };
+      if (sp.has(p.id)) { sp.set(nid, sp.get(p.id)!); sp.delete(p.id); }
+      if (ctx.has(p.id)) { ctx.set(nid, ctx.get(p.id)!); ctx.delete(p.id); }
+    }
+  }
+  // Individual edits made after a move are stored under the new id.
+  const stored = loadStoredEdits();
+  for (const p of list) {
+    const s = stored[p.id];
+    if (!s) continue;
+    if (typeof s.species === "string") sp.set(p.id, s.species);
+    if (typeof s.context === "string") ctx.set(p.id, s.context);
+  }
+}
+
 // Filler words to skip at the start of a description when guessing the species.
 const LEAD_FILLER = new Set([
   ...HEB_STOP,
@@ -342,6 +411,20 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [driveDown, setDriveDown] = useState(false);
   const [dupCount, setDupCount] = useState(0);
   const [indexCount, setIndexCount] = useState(0);
+  const projectKey = currentProjectId || "local";
+  const [pending, setPending] = useState<PendingOp[]>([]);
+  useEffect(() => setPending(loadPending(projectKey)), [projectKey]);
+  function addPending(op: PendingOp) {
+    setPending((prev) => {
+      const next = [...prev, op];
+      storePending(projectKey, next);
+      return next;
+    });
+  }
+  function clearPending() {
+    storePending(projectKey, []);
+    setPending([]);
+  }
 
   const [species, setSpecies] = useState<Map<string, string>>(new Map());
   const [context, setContext] = useState<Map<string, string>>(new Map());
@@ -859,8 +942,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       return s;
     });
   }
-  /** Name the selection AND save it into the current (default) album folder. */
-  async function applyGroupName() {
+  /** Name the selection locally; written to Drive on « 💾 Save ». */
+  function applyGroupName() {
     const name = groupName.trim();
     if (!name || selected.size === 0) return;
     const newSp = new Map(species);
@@ -868,10 +951,11 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       newSp.set(id, name);
       persistEdit(id, name, context.get(id) || "");
     }
+    addPending({ type: "name", ids: [...selected], species: name });
     setSpecies(newSp);
     setSelected(new Set());
     setGroupName("");
-    await saveToDrive(newSp); // write names + upload into their default folder
+    setOkMsg(`📝 ${selected.size} photo(s) groupée(s) « ${name} » — cliquez « 💾 Save » pour enregistrer dans Drive.`);
   }
 
   /** Load all app-created folders (for the MoveTo tree browser). */
@@ -917,87 +1001,45 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     }
   }
 
-  /** Move the selected photos into the given folder (album = its name). */
-  async function moveSelectedInto(targetId: string, targetName: string) {
+  /**
+   * Move the selected photos into the given folder (album = its name) — locally
+   * only; the Drive moves are queued and done on « 💾 Save ».
+   */
+  function moveSelectedInto(targetId: string, targetName: string) {
     const ids = new Set(selected);
     const toMove = photos.filter((p) => ids.has(p.id));
     if (toMove.length === 0) return;
     setError(null);
-    setOkMsg(null);
-    setBusy(`Déplacement vers « ${targetName} »…`);
-    try {
-      // Map current album name -> folder id (for removeParents), from loaded project.
-      const st = await fetchDriveState();
-      const folderIdByName = st.folderIdByName;
+    addPending({
+      type: "move",
+      items: toMove.map((p) => ({ id: p.id, driveId: p.driveId })),
+      targetId,
+      targetName,
+    });
 
-      setProg({ done: 0, total: toMove.length });
-      let done = 0;
-      for (const p of toMove) {
-        if (p.driveId && p.album !== targetName) {
-          const cur = folderIdByName.get(p.album);
-          const qp = new URLSearchParams({ addParents: targetId, fields: "id" });
-          if (cur) qp.set("removeParents", cur);
-          try {
-            await driveFetch(`${DRIVE}/${p.driveId}?${qp}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({}),
-            });
-          } catch {
-            /* skip */
-          }
-        }
-        done++;
-        setProg({ done, total: toMove.length });
-      }
-
-      // Update local state: change album + id; migrate species/context; rebuild index.
-      const idMap = new Map<string, string>();
-      const newPhotos = photos.map((p) => {
-        if (!ids.has(p.id)) return p;
-        const nid = `${targetName}/${p.name}`;
-        idMap.set(p.id, nid);
-        return { ...p, album: targetName, id: nid };
-      });
-      const spNew = new Map(species);
-      const ctxNew = new Map(context);
-      for (const [o, n] of idMap) {
-        if (spNew.has(o)) { spNew.set(n, spNew.get(o)!); spNew.delete(o); }
-        if (ctxNew.has(o)) { ctxNew.set(n, ctxNew.get(o)!); ctxNew.delete(o); }
-      }
-      setPhotos(newPhotos);
-      setSpecies(spNew);
-      setContext(ctxNew);
-      setSelected(new Set());
-      setMoveOpen(false);
-      setMoveNewName("");
-
-      try {
-        if (!driveRef.current.indexFileId) driveRef.current.indexFileId = st.indexFileId;
-        const index = newPhotos.map((p) => ({
-          file: p.name,
-          album: p.album,
-          group: p.group,
-          date: p.date,
-          description: p.description,
-          species: spNew.get(p.id) || "",
-          context: ctxNew.get(p.id) || "",
-        }));
-        driveRef.current.indexFileId = await writeIndexFile(
-          driveRef.current.indexFileId,
-          JSON.stringify(index, null, 2),
-        );
-      } catch {
-        /* index best-effort */
-      }
-      if (currentProjectId) refreshDriveInfo(currentProjectId);
-      setOkMsg(`✅ ${toMove.length} photo(s) déplacée(s) vers « ${targetName} ».`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-      setProg(null);
+    // Update local state: change album + id; migrate species/context.
+    const idMap = new Map<string, string>();
+    const newPhotos = photos.map((p) => {
+      if (!ids.has(p.id)) return p;
+      const nid = `${targetName}/${p.name}`;
+      idMap.set(p.id, nid);
+      return { ...p, album: targetName, id: nid };
+    });
+    const spNew = new Map(species);
+    const ctxNew = new Map(context);
+    for (const [o, n] of idMap) {
+      if (spNew.has(o)) { spNew.set(n, spNew.get(o)!); spNew.delete(o); }
+      if (ctxNew.has(o)) { ctxNew.set(n, ctxNew.get(o)!); ctxNew.delete(o); }
     }
+    setPhotos(newPhotos);
+    setSpecies(spNew);
+    setContext(ctxNew);
+    setSelected(new Set());
+    setMoveOpen(false);
+    setMoveNewName("");
+    setOkMsg(
+      `📝 ${toMove.length} photo(s) groupée(s) vers « ${targetName} » — cliquez « 💾 Save » pour enregistrer dans Drive.`,
+    );
   }
 
   /**
@@ -1228,6 +1270,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           ctx.set(p.id, rest);
         }
       }
+      replayPending(loadPending(projectKey), next, sp, ctx);
       setSpecies(sp);
       setContext(ctx);
       setPhotos(next);
@@ -1467,13 +1510,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
 
-  async function saveToDrive(spOverride?: Map<string, string>) {
+  /**
+   * Upload new photos + write myphotos.json. `parentById` sends a photo into a
+   * specific folder (a queued move) instead of its album folder.
+   */
+  async function saveToDrive(parentById?: Map<string, string>): Promise<boolean> {
     if (!accessToken) {
       setError("Non connecté à Google (jeton manquant).");
-      return;
+      return false;
     }
-    if (photos.length === 0) return;
-    const sp = spOverride ?? species;
+    if (photos.length === 0) return false;
+    const sp = species;
     setError(null);
     setOkMsg(null);
     setBusy("Vérification de votre Drive…");
@@ -1484,8 +1531,14 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       const folderIdByName = existing.folderIdByName;
       const projectId = await getProjectFolderId(); // album folders go inside it
 
+      // Upload only local photos not already present in their album (dedup album/name).
+      const toUpload = photos.filter(
+        (p) => p.blob && !p.driveId && !existing.existingKeys.has(`${p.album}/${p.name}`),
+      );
+      const skipped = photos.length - toUpload.length;
+
       // Ensure a Drive folder exists for every album we're about to upload to.
-      const albums = [...new Set(photos.map((p) => p.album))];
+      const albums = [...new Set(toUpload.filter((p) => !parentById?.has(p.id)).map((p) => p.album))];
       const toCreate = albums.filter((a) => !folderIdByName.has(a));
       if (toCreate.length) {
         setBusy("Préparation des dossiers…");
@@ -1514,11 +1567,6 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         }
       }
 
-      // Upload only photos not already present in their album (dedup album/name).
-      const toUpload = photos.filter(
-        (p) => p.blob && !existing.existingKeys.has(`${p.album}/${p.name}`),
-      );
-      const skipped = photos.length - toUpload.length;
       let done = 0;
       setBusy("Copie vers Drive…");
       setProg({ done: 0, total: toUpload.length });
@@ -1527,7 +1575,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         while (cursor < toUpload.length) {
           const p = toUpload[cursor++];
           try {
-            const parent = folderIdByName.get(p.album)!;
+            const parent = parentById?.get(p.id) || folderIdByName.get(p.album)!;
             const form = new FormData();
             form.append(
               "metadata",
@@ -1569,11 +1617,86 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           ? `✅ Terminé : ${toUpload.length} nouvelle(s) photo(s) dans ${albums.length} dossier(s), ${skipped} déjà présente(s).`
           : `✅ Terminé : ${toUpload.length} photo(s) copiée(s) dans ${albums.length} dossier(s).`,
       );
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setBusy(null);
       setProg(null);
+    }
+  }
+
+  /**
+   * « 💾 Save »: perform the queued Drive moves, then upload new photos and
+   * write myphotos.json. The queue is cleared only if everything succeeded.
+   */
+  async function saveAll() {
+    if (!accessToken) {
+      setError("Non connecté à Google (jeton manquant).");
+      return;
+    }
+    // Final destination per photo (a photo may have been moved several times).
+    const targetByDrive = new Map<string, string>();
+    const targetById = new Map<string, string>();
+    const idNow = new Map<string, string>(); // id at move time -> current id
+    for (const op of pending) {
+      if (op.type !== "move") continue;
+      for (const it of op.items) {
+        if (it.driveId) targetByDrive.set(it.driveId, op.targetId);
+        else {
+          const cur = idNow.get(it.id) ?? it.id;
+          const nid = `${op.targetName}/${cur.slice(cur.indexOf("/") + 1)}`;
+          idNow.set(it.id, nid);
+          targetById.set(nid, op.targetId);
+        }
+      }
+    }
+    // Local photos (not yet in Drive) go straight into their chosen folder.
+    const parentById = new Map<string, string>();
+    for (const p of photos) {
+      const t = targetById.get(p.id);
+      if (t && !p.driveId) parentById.set(p.id, t);
+    }
+
+    setError(null);
+    setOkMsg(null);
+    let failed = 0;
+    const moves = [...targetByDrive.entries()];
+    if (moves.length) {
+      setBusy("Déplacement des photos dans Drive…");
+      setProg({ done: 0, total: moves.length });
+      let done = 0;
+      for (const [driveId, targetId] of moves) {
+        try {
+          const r = await driveFetch(`${DRIVE}/${driveId}?fields=parents`);
+          if (!r.ok) throw new Error(String(r.status));
+          const parents: string[] = (await r.json()).parents || [];
+          const others = parents.filter((x) => x !== targetId);
+          if (others.length || !parents.includes(targetId)) {
+            const qp = new URLSearchParams({ fields: "id" });
+            if (!parents.includes(targetId)) qp.set("addParents", targetId);
+            if (others.length) qp.set("removeParents", others.join(","));
+            const m = await driveFetch(`${DRIVE}/${driveId}?${qp}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}),
+            });
+            if (!m.ok) throw new Error(String(m.status));
+          }
+        } catch {
+          failed++;
+        }
+        done++;
+        setProg({ done, total: moves.length });
+      }
+    }
+    const ok = await saveToDrive(parentById);
+    if (currentProjectId) refreshDriveInfo(currentProjectId);
+    if (failed) {
+      setError(`${failed} déplacement(s) ont échoué — les opérations restent en attente, réessayez « 💾 Save ».`);
+    } else if (ok) {
+      clearPending();
     }
   }
 
@@ -1690,6 +1813,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         if (typeof s.species === "string") sp.set(p.id, s.species);
         if (typeof s.context === "string") ctx.set(p.id, s.context);
       }
+      // Re-apply groupings not yet saved to Drive (survive a refresh).
+      const ops = loadPending(projectKey);
+      replayPending(ops, next, sp, ctx);
 
       if (next.length === 0) setError("Aucune photo trouvée dans votre Drive.");
       else setOkMsg(`✅ ${next.length} photo(s) chargée(s) depuis votre Drive.`);
@@ -2198,7 +2324,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
             un import qu'après avoir renommé ou groupé des photos.
           </p>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button className="btn btn-accent" onClick={() => saveToDrive()} disabled={!!busy}>
+            <button className="btn btn-accent" onClick={saveAll} disabled={!!busy}>
               💾 Sauvegarder
             </button>
             <button className="btn btn-ghost" onClick={() => loadFromDrive()} disabled={!!busy}>
@@ -2309,6 +2435,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               </button>
             )}
           </div>
+
+          {pending.length > 0 && (
+            <div className="notice notice-info" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span>
+                📝 {pending.length} opération(s) de classement en attente — pas encore dans Drive.
+              </span>
+              <button className="btn btn-accent btn-sm" onClick={saveAll} disabled={!!busy}>
+                💾 Save
+              </button>
+            </div>
+          )}
 
           {selected.size > 0 && (
             <div className="batchbar">

@@ -346,14 +346,14 @@ const MONTHS_ABBR = [
   "Janv", "Févr", "Mars", "Avr", "Mai", "Juin",
   "Juil", "Août", "Sept", "Oct", "Nov", "Déc",
 ];
-/** Format a date as "JJ Mois AAAA HH:MM" (e.g. "14 Sept 2026 17:54"). */
+/** Format a date as "JJMoisAAAA HH:MM" (e.g. "14Sept2026 17:54"). */
 function formatDate(ts: string | null, raw: string | null): string {
   const d = ts ? new Date(ts) : raw ? new Date(raw) : null;
   if (!d || isNaN(d.getTime())) return raw || "";
   const dd = String(d.getDate()).padStart(2, "0");
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${dd} ${MONTHS_ABBR[d.getMonth()]} ${d.getFullYear()} ${hh}:${mm}`;
+  return `${dd}${MONTHS_ABBR[d.getMonth()]}${d.getFullYear()} ${hh}:${mm}`;
 }
 
 function parseFacebookHtml(text: string) {
@@ -2228,7 +2228,10 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         {looksLikeTime(context.get(p.id) || "") && (
           <span className="tag-time">🕒 temps</span>
         )}
-        <div className="date">{formatDate(p.ts, p.date)}</div>
+        {/* ltr: keep "26Janv2026 06:17" in order inside RTL layouts */}
+        <div className="date">
+          <bdi dir="ltr">{formatDate(p.ts, p.date)}</bdi>
+        </div>
       </figcaption>
     </figure>
   );
@@ -2699,7 +2702,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           <img src={lb.url} alt={lb.description || ""} />
           <div className="lb-cap" dir="auto">
             <div>{lb.description || "(sans description)"}</div>
-            <div className="date">{formatDate(lb.ts, lb.date)}</div>
+            <div className="date">
+              <bdi dir="ltr">{formatDate(lb.ts, lb.date)}</bdi>
+            </div>
           </div>
         </div>
       )}

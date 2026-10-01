@@ -1316,13 +1316,20 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     setProg({ done: 0, total: files.length });
     try {
       // Photos of this folder already in Drive: only their date gets fixed.
+      // If the folder already exists in myphotos.json, NOTHING is imported:
+      // the folder is only used to fill missing dates.
       let inDrive = new Set<string>();
+      let fixOnly = false;
       if (accessToken) {
-        try {
-          inDrive = (await fetchDriveState()).existingKeys;
-        } catch {
-          /* offline — import everything */
+        const st = await fetchDriveState();
+        inDrive = st.existingKeys;
+        if (st.indexFileId) {
+          const r = await driveFetch(`${DRIVE}/${st.indexFileId}?alt=media`);
+          if (!r.ok) throw new Error(`Lecture de ${INDEX_NAME} impossible (${r.status}).`);
+          const arr = await r.json().catch(() => []);
+          fixOnly = Array.isArray(arr) && arr.some((m: any) => (m?.album || "") === album);
         }
+        if (fixOnly) setBusy(`« ${album} » existe déjà — lecture des dates uniquement…`);
       }
       const dateFix = new Map<string, string>(); // file name -> capture date
       const stored = loadStoredEdits();
@@ -1333,8 +1340,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       for (const file of files) {
         const iso = await photoDate(file); // read from the ORIGINAL (downscale drops EXIF)
         const id = `${album}/${file.name}`;
-        if (inDrive.has(id)) {
-          dateFix.set(file.name, iso);
+        if (fixOnly || inDrive.has(id)) {
+          if (inDrive.has(id)) dateFix.set(file.name, iso);
           done++;
           setProg({ done, total: files.length });
           continue;
@@ -1377,6 +1384,13 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       if (dateFix.size) {
         setBusy(`Correction des dates dans ${INDEX_NAME}…`);
         fixed = await fixDriveDates(album, dateFix);
+      }
+      if (fixOnly) {
+        setOkMsg(
+          `✅ « ${album} » existe déjà : aucune photo importée, ` +
+            `date manquante ajoutée pour ${fixed} photo(s) sur ${dateFix.size} dans Drive.`,
+        );
+        return;
       }
       setOkMsg(
         `✅ ${added.length} nouvelle(s) photo(s) importée(s) du dossier « ${album} »` +

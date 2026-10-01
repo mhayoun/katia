@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
+import exifr from "exifr";
 
 interface Meta {
   file?: string;
@@ -327,6 +328,18 @@ function parseDate(s: string | null): string | null {
   if (!s) return null;
   const d = new Date(s.replace(/\bpm\b/i, "PM").replace(/\bam\b/i, "AM"));
   return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/** Capture date (EXIF DateTimeOriginal) as ISO; falls back to the file's mtime. */
+async function photoDate(file: File): Promise<string> {
+  try {
+    const x = await exifr.parse(file, ["DateTimeOriginal", "CreateDate"]);
+    const d: unknown = x?.DateTimeOriginal || x?.CreateDate;
+    if (d instanceof Date && !isNaN(d.getTime())) return d.toISOString();
+  } catch {
+    /* no EXIF */
+  }
+  return new Date(file.lastModified).toISOString();
 }
 
 const MONTHS_ABBR = [
@@ -1302,17 +1315,33 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     setBusy(`Import du dossier « ${album} » (réduction des tailles)…`);
     setProg({ done: 0, total: files.length });
     try {
+      // Photos of this folder already in Drive: only their date gets fixed.
+      let inDrive = new Set<string>();
+      if (accessToken) {
+        try {
+          inDrive = (await fetchDriveState()).existingKeys;
+        } catch {
+          /* offline — import everything */
+        }
+      }
+      const dateFix = new Map<string, string>(); // file name -> capture date
       const stored = loadStoredEdits();
       const added: Photo[] = [];
       const spAdd = new Map<string, string>();
       const ctxAdd = new Map<string, string>();
       let done = 0;
       for (const file of files) {
+        const iso = await photoDate(file); // read from the ORIGINAL (downscale drops EXIF)
+        const id = `${album}/${file.name}`;
+        if (inDrive.has(id)) {
+          dateFix.set(file.name, iso);
+          done++;
+          setProg({ done, total: files.length });
+          continue;
+        }
         const blob = await downscaleImage(file);
         const url = URL.createObjectURL(blob);
         urlsRef.current.push(url);
-        const id = `${album}/${file.name}`;
-        const iso = new Date(file.lastModified).toISOString();
         added.push({
           id,
           name: file.name,
@@ -1344,13 +1373,69 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         for (const [k, v] of ctxAdd) if (!m.has(k)) m.set(k, v);
         return m;
       });
-      setOkMsg(`✅ ${added.length} photo(s) importée(s) du dossier « ${album} » (tailles réduites).`);
+      let fixed = 0;
+      if (dateFix.size) {
+        setBusy(`Correction des dates dans ${INDEX_NAME}…`);
+        fixed = await fixDriveDates(album, dateFix);
+      }
+      setOkMsg(
+        `✅ ${added.length} nouvelle(s) photo(s) importée(s) du dossier « ${album} »` +
+          (dateFix.size ? `, date corrigée pour ${fixed} photo(s) déjà dans Drive.` : "."),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
       setProg(null);
     }
+  }
+
+  /**
+   * Set the capture date of photos already in Drive (album + file name) in
+   * myphotos.json — nothing else is touched. Also updates loaded photos.
+   * Returns the number of photos whose date was written.
+   */
+  async function fixDriveDates(album: string, dates: Map<string, string>): Promise<number> {
+    const st = await fetchDriveState();
+    let arr: any[] = [];
+    if (st.indexFileId) {
+      const r = await driveFetch(`${DRIVE}/${st.indexFileId}?alt=media`);
+      if (!r.ok) throw new Error(`Lecture de ${INDEX_NAME} impossible (${r.status}).`);
+      const j = await r.json().catch(() => []);
+      if (Array.isArray(j)) arr = j;
+    }
+    const seen = new Set<string>();
+    for (const m of arr) {
+      if ((m?.album || "") === album && dates.has(m.file)) {
+        m.date = dates.get(m.file);
+        seen.add(m.file);
+      }
+    }
+    // Drive photos with no entry yet in myphotos.json: add a minimal one.
+    for (const [file, date] of dates) {
+      if (!seen.has(file)) {
+        arr.push({ file, album, group: album, date, description: null, species: "", context: "" });
+      }
+    }
+    const json = JSON.stringify(arr, null, 2);
+    if (st.indexFileId) {
+      const w = await driveFetch(`${DRIVE_UPLOAD}/${st.indexFileId}?uploadType=media`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: json,
+      });
+      if (!w.ok) throw new Error(`Écriture de ${INDEX_NAME} impossible (${w.status}).`);
+      driveRef.current.indexFileId = st.indexFileId;
+    } else {
+      driveRef.current.indexFileId = await writeIndexFile(null, json);
+    }
+    setPhotos((prev) =>
+      prev.map((p) => {
+        const d = p.album === album ? dates.get(p.name) : undefined;
+        return d ? { ...p, date: d, ts: d } : p;
+      }),
+    );
+    return dates.size;
   }
 
   async function driveFetch(url: string, init?: RequestInit) {

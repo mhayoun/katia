@@ -1317,13 +1317,26 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         if (!f.dir && IMG_EXT.test(path)) byName.set(baseName(path), f);
       });
 
+      // New posts only: skip photos whose file name is already anywhere in the
+      // project's Drive (even if moved to another folder) — they're classified.
+      let inDrive = new Set<string>();
+      if (accessToken) {
+        const st = await fetchDriveState();
+        inDrive = new Set(st.images.map((f) => f.name));
+      }
+
       const next: Photo[] = [];
       let done = 0;
+      let skipped = 0;
       const entries = [...metaRef.current.entries()].filter(
         ([, m]) =>
           groupFilter === "(tous)" || (m.group || "(inconnu)") === groupFilter,
       );
       for (const [name, m] of entries) {
+        if (inDrive.has(name)) {
+          skipped++;
+          continue;
+        }
         const f = byName.get(name);
         if (!f) continue;
         const blob = await f.async("blob");
@@ -1367,9 +1380,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       setSpecies(sp);
       setContext(ctx);
       setPhotos(next);
-      if (restored > 0) {
-        setOkMsg(`↩️ ${restored} modification(s) précédente(s) restaurée(s) automatiquement.`);
+      const parts: string[] = [];
+      if (accessToken) {
+        parts.push(
+          next.length
+            ? `🆕 ${next.length} nouvelle(s) photo(s) à importer`
+            : "✅ Aucune nouvelle photo : tout est déjà dans Drive",
+        );
+        if (skipped) parts.push(`${skipped} déjà dans Drive (ignorée(s))`);
       }
+      if (restored > 0) parts.push(`↩️ ${restored} modification(s) précédente(s) restaurée(s)`);
+      if (parts.length) setOkMsg(parts.join(" — ") + ".");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

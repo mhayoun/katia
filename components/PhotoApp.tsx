@@ -444,6 +444,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [species, setSpecies] = useState<Map<string, string>>(new Map());
   const [context, setContext] = useState<Map<string, string>>(new Map());
   const [q, setQ] = useState("");
+  const [driveQ, setDriveQ] = useState("");
   const [word, setWord] = useState<string | null>(null);
   const [sort, setSort] = useState("date-desc");
   const [nameFilter, setNameFilter] = useState<"all" | "named" | "unnamed">("all");
@@ -1255,6 +1256,50 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     persistEdit(id, species.get(id) || "", value);
   }
 
+  /**
+   * Search ALL photos via myphotos.json (name, description, place, album, file)
+   * and load only the matching ones from Drive.
+   */
+  async function searchDrive(term: string) {
+    const n = term.trim().toLowerCase();
+    if (!n || !accessToken) return;
+    setError(null);
+    setOkMsg(null);
+    setBusy(`Recherche de « ${term.trim()} » dans ${INDEX_NAME}…`);
+    let keys: Set<string>;
+    try {
+      const st = await fetchDriveState();
+      if (!st.indexFileId) throw new Error(`${INDEX_NAME} introuvable dans ce dossier de travail.`);
+      const r = await driveFetch(`${DRIVE}/${st.indexFileId}?alt=media`);
+      if (!r.ok) throw new Error(`Lecture de ${INDEX_NAME} impossible (${r.status}).`);
+      const arr = await r.json().catch(() => []);
+      keys = new Set(
+        (Array.isArray(arr) ? arr : [])
+          .filter((m: any) =>
+            [m?.species, m?.description, m?.context, m?.album, m?.file].some((v) =>
+              String(v || "").toLowerCase().includes(n),
+            ),
+          )
+          .map((m: any) => `${m.album || ""}/${m.file}`),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(null);
+      return;
+    }
+    setBusy(null);
+    if (keys.size === 0) {
+      setOkMsg(`🔎 Aucune photo ne correspond à « ${term.trim()} ».`);
+      return;
+    }
+    if (!confirmDropLocal()) return;
+    setNameFilter("all");
+    setAlbumFilter("(tous)");
+    setPickedFolders(new Set());
+    setQ(term.trim());
+    await loadFromDrive(undefined, keys);
+  }
+
   /** Loading from Drive replaces the list: confirm if imported photos aren't saved yet. */
   function confirmDropLocal(): boolean {
     const n = photos.filter((p) => !p.driveId).length;
@@ -1923,7 +1968,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     }
   }
 
-  async function loadFromDrive(onlyAlbums?: string[]) {
+  async function loadFromDrive(onlyAlbums?: string[], onlyKeys?: Set<string>) {
     if (!accessToken) {
       setError("Non connecté à Google (jeton manquant).");
       return;
@@ -1972,7 +2017,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       const imgs: { id: string; name: string; album: string }[] = [];
       const extraDriveIds: string[] = [];
       const only = onlyAlbums?.length ? new Set(onlyAlbums) : null;
-      const source = only ? st.images.filter((f) => only.has(f.album)) : st.images;
+      const source = st.images.filter(
+        (f) => (!only || only.has(f.album)) && (!onlyKeys || onlyKeys.has(`${f.album}/${f.name}`)),
+      );
       for (const f of source) {
         const key = `${f.album}/${f.name}`;
         if (seen.has(key)) {
@@ -2127,9 +2174,13 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
 
   const visible = useMemo(() => {
     let list = photos.slice();
-    if (q) {
-      const n = q.toLowerCase();
-      list = list.filter((p) => (p.description || "").toLowerCase().includes(n));
+    if (q.trim()) {
+      const n = q.trim().toLowerCase();
+      list = list.filter((p) =>
+        [p.description, species.get(p.id), context.get(p.id), p.album, p.name].some((v) =>
+          (v || "").toLowerCase().includes(n),
+        ),
+      );
     }
     if (word) list = list.filter((p) => (species.get(p.id) || "").trim() === word);
     if (albumFilter !== "(tous)") list = list.filter((p) => p.album === albumFilter);
@@ -2144,7 +2195,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     };
     list.sort(cmp[sort]);
     return list;
-  }, [photos, q, word, sort, nameFilter, albumFilter, species]);
+  }, [photos, q, word, sort, nameFilter, albumFilter, species, context]);
 
   const albums = useMemo(() => {
     const counts = new Map<string, number>();
@@ -2418,6 +2469,27 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
             </button>
           </div>
 
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <input
+              type="search"
+              dir="auto"
+              placeholder="🔎 Chercher une photo (nom, description, lieu…)"
+              value={driveQ}
+              onChange={(e) => setDriveQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") searchDrive(driveQ);
+              }}
+              style={{ flex: 1, minWidth: 200 }}
+            />
+            <button
+              className="btn btn-accent btn-sm"
+              disabled={!!busy || !driveQ.trim()}
+              onClick={() => searchDrive(driveQ)}
+            >
+              Chercher
+            </button>
+          </div>
+
           {driveFolders.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div className="hint" style={{ marginTop: 0, marginBottom: 6 }}>
@@ -2650,10 +2722,20 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           <div className="controls">
             <input
               type="search"
-              placeholder="Rechercher dans les descriptions…"
+              placeholder="Rechercher (nom, description, lieu…)"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
+            {accessToken && (
+              <button
+                className="btn btn-ghost btn-sm"
+                disabled={!!busy || !q.trim()}
+                title={`Chercher dans toutes les photos (${INDEX_NAME}) et les charger depuis Drive`}
+                onClick={() => searchDrive(q)}
+              >
+                🔎 Dans tout le Drive
+              </button>
+            )}
             <select value={sort} onChange={(e) => setSort(e.target.value)}>
               <option value="date-desc">Date ↓ (récent)</option>
               <option value="date-asc">Date ↑ (ancien)</option>

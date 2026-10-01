@@ -424,7 +424,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [driveDown, setDriveDown] = useState(false);
   const [dupCount, setDupCount] = useState(0);
   const [indexCount, setIndexCount] = useState(0);
-  const [loadedFolder, setLoadedFolder] = useState<string | null>(null);
+  // Folders chosen in « Ou chargez des dossiers précis » (multi-select).
+  const [pickedFolders, setPickedFolders] = useState<Set<string>>(new Set());
   const projectKey = currentProjectId || "local";
   const [pending, setPending] = useState<PendingOp[]>([]);
   useEffect(() => setPending(loadPending(projectKey)), [projectKey]);
@@ -710,7 +711,11 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       // 3) Drop its photos from the app.
       setPhotos((prev) => prev.filter((p) => p.album !== name));
       setSelected(new Set());
-      if (loadedFolder === name) setLoadedFolder(null);
+      setPickedFolders((prev) => {
+        const n = new Set(prev);
+        n.delete(name);
+        return n;
+      });
       if (albumFilter === name) setAlbumFilter("(tous)");
       if (currentProjectId) await refreshDriveInfo(currentProjectId);
       setOkMsg(`🗑️ Dossier « ${name} » mis à la corbeille de Drive et retiré de ${INDEX_NAME}.`);
@@ -1897,7 +1902,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     }
   }
 
-  async function loadFromDrive(onlyAlbum?: string) {
+  async function loadFromDrive(onlyAlbums?: string[]) {
     if (!accessToken) {
       setError("Non connecté à Google (jeton manquant).");
       return;
@@ -1945,7 +1950,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       const seen = new Set<string>();
       const imgs: { id: string; name: string; album: string }[] = [];
       const extraDriveIds: string[] = [];
-      const source = onlyAlbum ? st.images.filter((f) => f.album === onlyAlbum) : st.images;
+      const only = onlyAlbums?.length ? new Set(onlyAlbums) : null;
+      const source = only ? st.images.filter((f) => only.has(f.album)) : st.images;
       for (const f of source) {
         const key = `${f.album}/${f.name}`;
         if (seen.has(key)) {
@@ -2369,7 +2375,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               onClick={() => {
                 if (!confirmDropLocal()) return;
                 setNameFilter("all");
-                setLoadedFolder(null);
+                setPickedFolders(new Set());
                 loadFromDrive();
               }}
               disabled={!!busy}
@@ -2382,7 +2388,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               onClick={() => {
                 if (!confirmDropLocal()) return;
                 setNameFilter("unnamed");
-                setLoadedFolder(null);
+                setPickedFolders(new Set());
                 loadFromDrive();
               }}
               disabled={!!busy}
@@ -2394,23 +2400,25 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           {driveFolders.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div className="hint" style={{ marginTop: 0, marginBottom: 6 }}>
-                Ou chargez un dossier précis :
+                Ou cochez un ou plusieurs dossiers, puis chargez-les :
               </div>
               <div className="chips" dir="rtl">
                 {driveFolders.map((f) => (
                   <span key={f.name} className="chip-group">
                   <button
-                    className={`chip ${photos.length > 0 && loadedFolder === f.name ? "active" : ""}`}
+                    className={`chip ${pickedFolders.has(f.name) ? "active" : ""}`}
                     disabled={!!busy}
-                    title={`Charger le dossier « ${f.name} »`}
-                    onClick={() => {
-                      if (!confirmDropLocal()) return;
-                      setNameFilter("all");
-                      setLoadedFolder(f.name);
-                      loadFromDrive(f.name);
-                    }}
+                    title={`Choisir / retirer le dossier « ${f.name} »`}
+                    onClick={() =>
+                      setPickedFolders((prev) => {
+                        const n = new Set(prev);
+                        if (n.has(f.name)) n.delete(f.name);
+                        else n.add(f.name);
+                        return n;
+                      })
+                    }
                   >
-                    📁 {f.name} ({f.count})
+                    {pickedFolders.has(f.name) ? "☑" : "☐"} 📁 {f.name} ({f.count})
                   </button>
                   <button
                     className="chip chip-del"
@@ -2423,6 +2431,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
                   </span>
                 ))}
               </div>
+              <button
+                className="btn btn-accent btn-sm"
+                disabled={!!busy || pickedFolders.size === 0}
+                onClick={() => {
+                  if (!confirmDropLocal()) return;
+                  setNameFilter("all");
+                  loadFromDrive([...pickedFolders]);
+                }}
+              >
+                📂 Charger {pickedFolders.size > 1 ? `les ${pickedFolders.size} dossiers` : "le dossier"}
+              </button>
             </div>
           )}
 

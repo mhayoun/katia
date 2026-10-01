@@ -424,6 +424,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [driveDown, setDriveDown] = useState(false);
   const [dupCount, setDupCount] = useState(0);
   const [indexCount, setIndexCount] = useState(0);
+  const [loadedFolder, setLoadedFolder] = useState<string | null>(null);
   const projectKey = currentProjectId || "local";
   const [pending, setPending] = useState<PendingOp[]>([]);
   useEffect(() => setPending(loadPending(projectKey)), [projectKey]);
@@ -1184,6 +1185,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       return m;
     });
     persistEdit(id, species.get(id) || "", value);
+  }
+
+  /** Loading from Drive replaces the list: confirm if imported photos aren't saved yet. */
+  function confirmDropLocal(): boolean {
+    const n = photos.filter((p) => !p.driveId).length;
+    return (
+      n === 0 ||
+      window.confirm(
+        `${n} photo(s) importée(s) ne sont pas encore sauvegardées dans Drive et seront retirées de l'affichage. Continuer ?`,
+      )
+    );
   }
 
   function reset() {
@@ -2280,7 +2292,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         )}
       </div>
 
-      {existingCount !== null && existingCount > 0 && photos.length === 0 && (
+      {existingCount !== null && existingCount > 0 && (
         <div className="card">
           <div className="notice notice-info" style={{ marginBottom: 0 }}>
             📁 Vous avez déjà <strong>{existingCount} photo(s)</strong> dans votre
@@ -2289,7 +2301,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               className="btn btn-accent btn-sm"
               style={{ marginInlineStart: 8 }}
               onClick={() => {
+                if (!confirmDropLocal()) return;
                 setNameFilter("all");
+                setLoadedFolder(null);
                 loadFromDrive();
               }}
               disabled={!!busy}
@@ -2300,7 +2314,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               className="btn btn-ghost btn-sm"
               style={{ marginInlineStart: 8 }}
               onClick={() => {
+                if (!confirmDropLocal()) return;
                 setNameFilter("unnamed");
+                setLoadedFolder(null);
                 loadFromDrive();
               }}
               disabled={!!busy}
@@ -2318,11 +2334,13 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
                 {driveFolders.map((f) => (
                   <button
                     key={f.name}
-                    className="chip"
+                    className={`chip ${photos.length > 0 && loadedFolder === f.name ? "active" : ""}`}
                     disabled={!!busy}
                     title={`Charger le dossier « ${f.name} »`}
                     onClick={() => {
+                      if (!confirmDropLocal()) return;
                       setNameFilter("all");
+                      setLoadedFolder(f.name);
                       loadFromDrive(f.name);
                     }}
                   >

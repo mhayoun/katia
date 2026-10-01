@@ -658,6 +658,69 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     }
   }
 
+  /**
+   * Delete an album folder: move it to the Drive trash (with its photos —
+   * recoverable for 30 days) and remove its entries from myphotos.json.
+   */
+  async function deleteFolder(name: string, count: number) {
+    if (
+      !window.confirm(
+        `Effacer le dossier « ${name} » et ses ${count} photo(s) ?\n` +
+          `Le dossier sera mis à la corbeille de Google Drive (récupérable 30 jours) ` +
+          `et ses photos retirées de ${INDEX_NAME}.`,
+      )
+    ) {
+      return;
+    }
+    setError(null);
+    setOkMsg(null);
+    setBusy(`Suppression du dossier « ${name} »…`);
+    try {
+      const st = await fetchDriveState();
+      const folderId = st.folderIdByName.get(name);
+      if (!folderId) throw new Error(`Dossier « ${name} » introuvable dans Drive.`);
+
+      // 1) Remove its entries from myphotos.json (before trashing, so a failure
+      //    here leaves Drive untouched).
+      if (st.indexFileId) {
+        const r = await driveFetch(`${DRIVE}/${st.indexFileId}?alt=media`);
+        if (!r.ok) throw new Error(`Lecture de ${INDEX_NAME} impossible (${r.status}).`);
+        const arr = await r.json().catch(() => []);
+        if (Array.isArray(arr)) {
+          const kept = arr.filter((m: any) => (m?.album || "") !== name);
+          if (kept.length !== arr.length) {
+            const w = await driveFetch(`${DRIVE_UPLOAD}/${st.indexFileId}?uploadType=media`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(kept, null, 2),
+            });
+            if (!w.ok) throw new Error(`Écriture de ${INDEX_NAME} impossible (${w.status}).`);
+          }
+        }
+      }
+
+      // 2) Trash the folder (its photos go with it).
+      const t = await driveFetch(`${DRIVE}/${folderId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trashed: true }),
+      });
+      if (!t.ok) throw new Error(`Mise à la corbeille impossible (${t.status}).`);
+
+      // 3) Drop its photos from the app.
+      setPhotos((prev) => prev.filter((p) => p.album !== name));
+      setSelected(new Set());
+      if (loadedFolder === name) setLoadedFolder(null);
+      if (albumFilter === name) setAlbumFilter("(tous)");
+      if (currentProjectId) await refreshDriveInfo(currentProjectId);
+      setOkMsg(`🗑️ Dossier « ${name} » mis à la corbeille de Drive et retiré de ${INDEX_NAME}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   /** Switch the active work folder (resets caches + reloads its info). */
   function selectProject(folderId: string) {
     setCurrentProjectId(folderId);
@@ -2335,8 +2398,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               </div>
               <div className="chips" dir="rtl">
                 {driveFolders.map((f) => (
+                  <span key={f.name} className="chip-group">
                   <button
-                    key={f.name}
                     className={`chip ${photos.length > 0 && loadedFolder === f.name ? "active" : ""}`}
                     disabled={!!busy}
                     title={`Charger le dossier « ${f.name} »`}
@@ -2349,6 +2412,15 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
                   >
                     📁 {f.name} ({f.count})
                   </button>
+                  <button
+                    className="chip chip-del"
+                    disabled={!!busy}
+                    title={`Effacer le dossier « ${f.name} » (Drive + ${INDEX_NAME})`}
+                    onClick={() => deleteFolder(f.name, f.count)}
+                  >
+                    🗑
+                  </button>
+                  </span>
                 ))}
               </div>
             </div>

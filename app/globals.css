@@ -741,3 +741,15 @@ label.btn[aria-disabled="true"] {
     grid-template-columns: 1fr;
   }
 }
+
+.chip-group {
+  display: inline-flex;
+  gap: 2px;
+}
+.chip-del {
+  padding: 3px 6px;
+}
+.chip-del:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: rgba(239, 68, 68, 0.15);
+}

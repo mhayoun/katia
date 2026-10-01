@@ -1380,7 +1380,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       }
       setOkMsg(
         `✅ ${added.length} nouvelle(s) photo(s) importée(s) du dossier « ${album} »` +
-          (dateFix.size ? `, date corrigée pour ${fixed} photo(s) déjà dans Drive.` : "."),
+          (dateFix.size
+            ? `, ${dateFix.size} déjà dans Drive (date manquante ajoutée pour ${fixed}).`
+            : "."),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1391,9 +1393,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   }
 
   /**
-   * Set the capture date of photos already in Drive (album + file name) in
-   * myphotos.json — nothing else is touched. Also updates loaded photos.
-   * Returns the number of photos whose date was written.
+   * Fill the MISSING date of photos already in Drive (album + file name) in
+   * myphotos.json — existing dates and everything else are left untouched.
+   * Also updates loaded photos. Returns the number of dates filled.
    */
   async function fixDriveDates(album: string, dates: Map<string, string>): Promise<number> {
     const st = await fetchDriveState();
@@ -1405,18 +1407,23 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       if (Array.isArray(j)) arr = j;
     }
     const seen = new Set<string>();
+    const filled = new Map<string, string>();
     for (const m of arr) {
-      if ((m?.album || "") === album && dates.has(m.file)) {
+      if ((m?.album || "") !== album || !dates.has(m.file)) continue;
+      seen.add(m.file);
+      if (!m.date) {
         m.date = dates.get(m.file);
-        seen.add(m.file);
+        filled.set(m.file, m.date);
       }
     }
     // Drive photos with no entry yet in myphotos.json: add a minimal one.
     for (const [file, date] of dates) {
       if (!seen.has(file)) {
         arr.push({ file, album, group: album, date, description: null, species: "", context: "" });
+        filled.set(file, date);
       }
     }
+    if (filled.size === 0) return 0;
     const json = JSON.stringify(arr, null, 2);
     if (st.indexFileId) {
       const w = await driveFetch(`${DRIVE_UPLOAD}/${st.indexFileId}?uploadType=media`, {
@@ -1431,11 +1438,11 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     }
     setPhotos((prev) =>
       prev.map((p) => {
-        const d = p.album === album ? dates.get(p.name) : undefined;
+        const d = p.album === album ? filled.get(p.name) : undefined;
         return d ? { ...p, date: d, ts: d } : p;
       }),
     );
-    return dates.size;
+    return filled.size;
   }
 
   async function driveFetch(url: string, init?: RequestInit) {

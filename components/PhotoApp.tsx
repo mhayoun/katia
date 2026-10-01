@@ -1432,12 +1432,28 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     };
   }
 
-  /** Create or update myphotos.json inside the project folder. Returns its id. */
+  /**
+   * Create or update myphotos.json inside the project folder. Returns its id.
+   * MERGES with the existing file: entries for photos not loaded in the app
+   * (other albums, partial load) are kept as long as the photo is still in
+   * Drive, so saving never wipes the classification of unloaded photos.
+   */
   async function writeIndexFile(
     indexFileId: string | null,
     json: string,
   ): Promise<string | null> {
     if (indexFileId) {
+      const r = await driveFetch(`${DRIVE}/${indexFileId}?alt=media`);
+      if (!r.ok) throw new Error(`Lecture de ${INDEX_NAME} impossible (${r.status}) — rien n'a été écrit.`);
+      const old: any[] = await r.json().catch(() => []);
+      const fresh: any[] = JSON.parse(json);
+      const key = (m: any) => `${m.album || ""}/${m.file}`;
+      const have = new Set(fresh.map(key));
+      const inDrive = (await fetchDriveState()).existingKeys;
+      const kept = Array.isArray(old)
+        ? old.filter((m) => m?.file && !have.has(key(m)) && inDrive.has(key(m)))
+        : [];
+      json = JSON.stringify([...fresh, ...kept], null, 2);
       await driveFetch(`${DRIVE_UPLOAD}/${indexFileId}?uploadType=media`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -1979,6 +1995,18 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], "he"));
   }, [visible, species]);
 
+  // Split groups into runs: each multi-photo group alone, consecutive
+  // single-photo groups together (laid out on 2 columns).
+  const groupRuns = useMemo(() => {
+    const runs: [string, Photo[]][][] = [];
+    for (const g of grouped) {
+      const last = runs[runs.length - 1];
+      if (g[1].length === 1 && last && last[0][1].length === 1) last.push(g);
+      else runs.push([g]);
+    }
+    return runs;
+  }, [grouped]);
+
   // Reusable card renderer so grid and grouped views stay identical.
   const renderCard = (p: Photo) => (
     <figure key={p.driveId || p.id} className={`photo ${selected.has(p.id) ? "selected" : ""}`}>
@@ -2509,14 +2537,22 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           {viewMode === "grid" ? (
             <div className="gallery">{visible.map(renderCard)}</div>
           ) : (
-            grouped.map(([name, list]) => (
-              <section key={name} className="group-section">
-                <h3 className="group-title" dir="auto">
-                  {name} <span className="count-pill">{list.length}</span>
-                </h3>
-                <div className="gallery" dir="rtl">{list.map(renderCard)}</div>
-              </section>
-            ))
+            groupRuns.map((run) => {
+              const sections = run.map(([name, list]) => (
+                <section key={name} className="group-section">
+                  <h3 className="group-title" dir="auto">
+                    {name} <span className="count-pill">{list.length}</span>
+                  </h3>
+                  <div className="gallery gallery-rows" dir="rtl">{list.map(renderCard)}</div>
+                </section>
+              ));
+              // Consecutive single-photo groups sit side by side (2 columns on web).
+              return run.length > 1 || run[0][1].length === 1 ? (
+                <div key={run[0][0]} className="singles-run" dir="rtl">{sections}</div>
+              ) : (
+                sections
+              );
+            })
           )}
 
           <datalist id="species-list">

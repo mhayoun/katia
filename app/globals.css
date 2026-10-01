@@ -698,3 +698,46 @@ label.btn[aria-disabled="true"] {
 .folder-row .chev {
   color: var(--muted);
 }
+
+/* Group view on web: photo first, caption (description / name / date) beside
+   it on the same row; consecutive single-photo groups on 2 columns. */
+@media (min-width: 760px) {
+  /* Always 2 photos per row: n photos -> ceil(n/2) rows. */
+  .gallery-rows {
+    grid-template-columns: 1fr 1fr;
+    gap: 14px 28px;
+  }
+  .gallery-rows .photo {
+    display: grid;
+    grid-template-columns: 180px 1fr;
+    gap: 12px;
+    align-items: start;
+    min-width: 0;
+  }
+  /* Fixed frame for each photo's details, same height as the photo. */
+  .gallery-rows .photo .cap {
+    height: 180px;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow-y: auto;
+    min-width: 0;
+  }
+  .gallery-rows .cap-desc {
+    font-size: 0.85rem;
+  }
+  /* Keep the AI buttons over the photo, next to the checkbox. */
+  .gallery-rows .ai-icons {
+    inset-inline-end: auto;
+    inset-inline-start: 34px;
+  }
+  .singles-run {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 28px;
+  }
+  .singles-run .gallery-rows {
+    grid-template-columns: 1fr;
+  }
+}

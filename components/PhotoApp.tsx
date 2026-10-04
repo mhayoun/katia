@@ -447,6 +447,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [driveQ, setDriveQ] = useState("");
   // Every species in myphotos.json (name -> photo count), for search suggestions.
   const [driveSpecies, setDriveSpecies] = useState<Map<string, number>>(new Map());
+  // Album name -> Drive folder id (for "open in Drive" links).
+  const [folderIds, setFolderIds] = useState<Map<string, string>>(new Map());
   const [word, setWord] = useState<string | null>(null);
   const [sort, setSort] = useState("date-desc");
   const [nameFilter, setNameFilter] = useState<"all" | "named" | "unnamed">("all");
@@ -668,6 +670,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           }
       }
       setDriveSpecies(sp);
+      setFolderIds(new Map(st.folderIdByName));
     } catch {
       /* ignore */
     }
@@ -2279,6 +2282,30 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     return runs;
   }, [grouped]);
 
+  /** File + album names, with links to the photo and its folder in Drive. */
+  const fileLocation = (p: Photo) => {
+    const fid = folderIds.get(p.album);
+    return (
+      <div className="file-loc" dir="auto">
+        {fid ? (
+          <a href={`https://drive.google.com/drive/folders/${fid}`} target="_blank" rel="noreferrer" title="Ouvrir le dossier dans Google Drive">
+            📁 {p.album}
+          </a>
+        ) : (
+          <span>📁 {p.album}</span>
+        )}
+        {" · "}
+        {p.driveId ? (
+          <a href={`https://drive.google.com/file/d/${p.driveId}/view`} target="_blank" rel="noreferrer" title="Ouvrir la photo dans Google Drive">
+            📄 {p.name}
+          </a>
+        ) : (
+          <span title="Pas encore sauvegardée dans Drive">📄 {p.name} (pas encore dans Drive)</span>
+        )}
+      </div>
+    );
+  };
+
   // Reusable card renderer so grid and grouped views stay identical.
   const renderCard = (p: Photo) => (
     <figure key={p.driveId || p.id} className={`photo ${selected.has(p.id) ? "selected" : ""}`}>
@@ -2386,6 +2413,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         <div className="date">
           <bdi dir="ltr">{formatDate(p.ts, p.date)}</bdi>
         </div>
+        {fileLocation(p)}
       </figcaption>
     </figure>
   );
@@ -2921,6 +2949,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
             <div className="date">
               <bdi dir="ltr">{formatDate(lb.ts, lb.date)}</bdi>
             </div>
+            {fileLocation(lb)}
           </div>
         </div>
       )}

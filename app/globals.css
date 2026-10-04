@@ -753,3 +753,17 @@ label.btn[aria-disabled="true"] {
   border-color: var(--danger);
   background: rgba(239, 68, 68, 0.15);
 }
+
+.file-loc {
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+.file-loc a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.file-loc a:hover {
+  text-decoration: underline;
+}

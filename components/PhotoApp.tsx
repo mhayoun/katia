@@ -957,6 +957,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       let high = 0;
       let low = 0;
       let byGemini = 0;
+      // Gemini is a slow fallback: give up on it for the rest of the batch
+      // after the first failure/timeout (quota, overload) instead of blocking.
+      let geminiOff = false;
       const conf = new Map<string, number>(aiConf);
       const cands = new Map<string, string[]>(aiCands);
       for (const p of targets) {
@@ -981,7 +984,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
 
           let chosen = best ? best[0] : "";
           // Very low similarity → ask Gemini; keep its answer if valid.
-          if (topSim < 0.5) {
+          if (topSim < 0.5 && !geminiOff) {
             try {
               const src = p.blob || (await (await fetch(p.url)).blob());
               const small = await downscaleImage(src, 768, 0.8);
@@ -990,14 +993,16 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ image, provider: "gemini", model: "gemini-3.8-flash", known: uniqueSpecies }),
+                signal: AbortSignal.timeout(20000),
               });
               const data = await res.json();
-              if (res.ok && data.name && data.name !== "?") {
+              if (!res.ok) geminiOff = true;
+              else if (data.name && data.name !== "?") {
                 chosen = data.name;
                 byGemini++;
               }
             } catch {
-              /* keep image guess */
+              geminiOff = true; // timeout / network — keep image guess
             }
           }
           if (chosen) {
@@ -1015,7 +1020,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       setAiConf(conf);
       setAiCands(cands);
       setOkMsg(
-        `✅ Reconnaissance : ${high} sûre(s), ${low} à vérifier, dont ${byGemini} via Gemini. ` +
+        `✅ Reconnaissance : ${high} sûre(s), ${low} à vérifier, dont ${byGemini} via Gemini` +
+          (geminiOff ? " (Gemini indisponible — quota ? — ignoré pour le reste)" : "") +
+          ". " +
           `La confiance (%) s'affiche sous chaque photo. Corrigez puis « Sauvegarder ».`,
       );
     } catch (e) {

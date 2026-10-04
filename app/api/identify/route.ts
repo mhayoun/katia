@@ -74,7 +74,9 @@ export async function POST(req: NextRequest) {
     try {
       const { text } = await generateText({
         model: m.model,
-        maxRetries: 1, // fail fast on an overloaded model, then try the next
+        // No retries: a 429 "retry in 56s" would otherwise block the request
+        // until the 60s limit. Fail fast and try the next model.
+        maxRetries: 0,
         messages: [
           {
             role: "user",

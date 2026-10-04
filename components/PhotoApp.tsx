@@ -331,6 +331,43 @@ function parseDate(s: string | null): string | null {
   return isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/** Normalize text for name matching: lowercase, no Hebrew niqqud, words only. */
+function normWords(t: string): string {
+  return ` ${t
+    .toLowerCase()
+    .replace(/[\u0591-\u05C7]/g, "") // niqqud / cantillation
+    .replace(/[^\p{L}]+/gu, " ") // digits, _, -, ., punctuation -> space
+    .trim()} `;
+}
+
+/**
+ * Find known species in a file name. Full match = the whole species name
+ * appears in the file name (longest wins). Otherwise partial = species
+ * sharing at least one word (≥ 3 letters) with the file name, best first.
+ */
+function speciesFromFileName(
+  fileName: string,
+  known: string[],
+): { full: string | null; partial: string[] } {
+  const f = normWords(fileName.replace(/\.[^.]+$/, ""));
+  let full: string | null = null;
+  const scored: [string, number][] = [];
+  for (const sp of known) {
+    const n = normWords(sp);
+    if (n.trim().length < 2) continue;
+    // Whole name, or followed by a suffix (plural…) when long enough.
+    if (f.includes(n) || (n.trim().length >= 4 && f.includes(n.trimEnd()))) {
+      if (!full || n.length > normWords(full).length) full = sp;
+      continue;
+    }
+    const words = n.trim().split(" ").filter((w) => w.length >= 3);
+    const hits = words.filter((w) => f.includes(` ${w} `) || (w.length >= 4 && f.includes(` ${w}`))).length;
+    if (hits) scored.push([sp, hits / words.length]);
+  }
+  scored.sort((a, b) => b[1] - a[1]);
+  return { full, partial: full ? [] : scored.slice(0, 3).map(([sp]) => sp) };
+}
+
 /** Capture date (EXIF DateTimeOriginal) as ISO; falls back to the file's mtime. */
 async function photoDate(file: File): Promise<string> {
   try {
@@ -1563,6 +1600,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       const added: Photo[] = [];
       const spAdd = new Map<string, string>();
       const ctxAdd = new Map<string, string>();
+      const candAdd = new Map<string, string[]>(); // partial file-name matches
+      let byFileName = 0;
       let done = 0;
       for (const file of files) {
         const iso = await photoDate(file); // read from the ORIGINAL (downscale drops EXIF)
@@ -1588,11 +1627,28 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           ts: iso,
         });
         const s = stored[id];
-        spAdd.set(id, s?.species ?? "");
+        let sp = s?.species ?? "";
+        if (!sp) {
+          // The bird's name is sometimes in the file name.
+          const m = speciesFromFileName(file.name, uniqueSpecies);
+          if (m.full) {
+            sp = m.full;
+            byFileName++;
+          } else if (m.partial.length) {
+            candAdd.set(id, m.partial);
+          }
+        }
+        spAdd.set(id, sp);
         ctxAdd.set(id, s?.context ?? "");
         done++;
         setProg({ done, total: files.length });
       }
+      if (candAdd.size)
+        setAiCands((prev) => {
+          const m = new Map(prev);
+          for (const [k, v] of candAdd) m.set(k, v);
+          return m;
+        });
       setPhotos((prev) => {
         const have = new Set(prev.map((p) => p.id));
         return [...prev, ...added.filter((p) => !have.has(p.id))];
@@ -1623,7 +1679,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         `✅ ${added.length} nouvelle(s) photo(s) importée(s) du dossier « ${album} »` +
           (dateFix.size
             ? `, ${dateFix.size} déjà dans Drive (date manquante ajoutée pour ${fixed}).`
-            : "."),
+            : ".") +
+          (byFileName ? ` 🏷️ ${byFileName} nommée(s) d'après le nom du fichier.` : "") +
+          (candAdd.size ? ` ${candAdd.size} avec des propositions (nom partiel dans le fichier).` : ""),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

@@ -36,6 +36,7 @@ const IMG_EXT = /\.(jpe?g|png|gif|webp)$/i;
 // Image recognition (SigLIP embeddings + k-NN).
 const EMB_NAME = "embeddings.json";
 const SIGLIP_MODEL = "Xenova/siglip-base-patch16-224";
+const EMB_DIM = 768; // pooled SigLIP image embedding size
 const KNN_K = 5; // neighbours to vote
 const SIM_OK = 0.72; // cosine threshold to accept an image match (else Gemini)
 
@@ -577,7 +578,10 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
 
   async function embedUrl(url: string): Promise<Float32Array> {
     const extractor = await getExtractor();
-    const out = await extractor(url);
+    // pool: the 768-d image embedding (pooler_output). Without it the pipeline
+    // returns last_hidden_state (196 patches × 768), which compares pixel
+    // layout instead of content and made recognition mostly wrong.
+    const out = await extractor(url, { pool: true });
     const v = Float32Array.from(out.data as Float32Array);
     let norm = 0;
     for (const x of v) norm += x * x;
@@ -886,7 +890,9 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     const obj = await r.json();
     for (const id of Object.keys(obj)) {
       const e = obj[id];
-      if (e?.vec) embIndexRef.current.set(id, { species: e.species, vec: Float32Array.from(e.vec) });
+      // Skip vectors from the old (buggy, unpooled) index: they're not comparable.
+      if (e?.vec?.length === EMB_DIM)
+        embIndexRef.current.set(id, { species: e.species, vec: Float32Array.from(e.vec) });
     }
     setIndexCount(embIndexRef.current.size);
     return embIndexRef.current.size > 0;
@@ -944,7 +950,10 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       if (!embIndexRef.current.size) {
         const ok = await loadEmbeddings();
         if (!ok) {
-          setError("Aucun index trouvé. Cliquez d'abord « 🧠 Indexer classées ».");
+          setError(
+            "Aucun index valide trouvé (l'ancien index est obsolète). " +
+              "Chargez vos photos classées puis cliquez « 🧠 Indexer réf. image ».",
+          );
           setBusy(null);
           return;
         }
@@ -962,9 +971,16 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       let geminiOff = false;
       const conf = new Map<string, number>(aiConf);
       const cands = new Map<string, string[]>(aiCands);
+      // Timing (shown live) to find what is slow: image model vs Gemini.
+      let tImg = 0;
+      let tGem = 0;
+      let nGem = 0;
+      const sec = (ms: number) => (ms / 1000).toFixed(1);
       for (const p of targets) {
         try {
+          const t0 = performance.now();
           const vec = await embedUrl(p.url);
+          tImg += performance.now() - t0;
           const sims = refs
             .map((r) => ({ species: r.species, sim: dot(vec, r.vec) }))
             .sort((a, b) => b.sim - a.sim)
@@ -985,6 +1001,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           let chosen = best ? best[0] : "";
           // Very low similarity → ask Gemini; keep its answer if valid.
           if (topSim < 0.5 && !geminiOff) {
+            const g0 = performance.now();
+            nGem++;
             try {
               const src = p.blob || (await (await fetch(p.url)).blob());
               const small = await downscaleImage(src, 768, 0.8);
@@ -1004,6 +1022,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
             } catch {
               geminiOff = true; // timeout / network — keep image guess
             }
+            tGem += performance.now() - g0;
           }
           if (chosen) {
             setSpeciesFor(p.id, chosen);
@@ -1016,6 +1035,10 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         }
         done++;
         setProg({ done, total: targets.length });
+        setBusy(
+          `Reconnaissance par image… image ≈ ${sec(tImg / done)} s/photo` +
+            (nGem ? ` · Gemini ${nGem} appel(s) ≈ ${sec(tGem / nGem)} s chacun` : ""),
+        );
       }
       setAiConf(conf);
       setAiCands(cands);
@@ -1023,7 +1046,10 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
         `✅ Reconnaissance : ${high} sûre(s), ${low} à vérifier, dont ${byGemini} via Gemini` +
           (geminiOff ? " (Gemini indisponible — quota ? — ignoré pour le reste)" : "") +
           ". " +
-          `La confiance (%) s'affiche sous chaque photo. Corrigez puis « Sauvegarder ».`,
+          `La confiance (%) s'affiche sous chaque photo. Corrigez puis « Sauvegarder ». ` +
+          `⏱ image ≈ ${sec(tImg / Math.max(1, done))} s/photo` +
+          (nGem ? `, Gemini ≈ ${sec(tGem / nGem)} s × ${nGem}` : "") +
+          ".",
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

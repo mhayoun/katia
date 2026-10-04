@@ -2343,11 +2343,6 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={p.url} alt={p.description || ""} loading="lazy" onClick={() => setLb(p)} />
       <figcaption className="cap">
-        {p.description && (
-          <div className="cap-desc" dir="auto" title={p.description}>
-            {p.description}
-          </div>
-        )}
         <EditableInput
           className="species-input"
           listId="species-list"
@@ -2414,6 +2409,11 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           <bdi dir="ltr">{formatDate(p.ts, p.date)}</bdi>
         </div>
         {fileLocation(p)}
+        {p.description && (
+          <div className="cap-desc" dir="auto" title={p.description}>
+            {p.description}
+          </div>
+        )}
       </figcaption>
     </figure>
   );
@@ -2945,11 +2945,11 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={lb.url} alt={lb.description || ""} />
           <div className="lb-cap" dir="auto">
-            <div>{lb.description || "(sans description)"}</div>
             <div className="date">
               <bdi dir="ltr">{formatDate(lb.ts, lb.date)}</bdi>
             </div>
             {fileLocation(lb)}
+            <div className="cap-desc">{lb.description || "(sans description)"}</div>
           </div>
         </div>
       )}

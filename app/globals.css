@@ -593,9 +593,10 @@ label.btn[aria-disabled="true"] {
   transition: width 0.2s ease;
 }
 .cap-desc {
-  font-size: 0.72rem;
+  font-size: 0.66rem;
   line-height: 1.25;
   color: var(--muted);
+  margin-top: 4px;
 }
 .date {
   font-size: 0.75rem;
@@ -723,9 +724,6 @@ label.btn[aria-disabled="true"] {
     border-radius: 10px;
     overflow-y: auto;
     min-width: 0;
-  }
-  .gallery-rows .cap-desc {
-    font-size: 0.85rem;
   }
   /* Keep the AI buttons over the photo, next to the checkbox. */
   .gallery-rows .ai-icons {

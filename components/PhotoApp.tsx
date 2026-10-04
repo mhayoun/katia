@@ -35,10 +35,12 @@ const IMG_EXT = /\.(jpe?g|png|gif|webp)$/i;
 
 // Image recognition (SigLIP embeddings + k-NN).
 const EMB_NAME = "embeddings.json";
-const SIGLIP_MODEL = "Xenova/siglip-base-patch16-224";
-const EMB_DIM = 768; // pooled SigLIP image embedding size
-const KNN_K = 5; // neighbours to vote
-const SIM_OK = 0.72; // cosine threshold to accept an image match (else Gemini)
+// Image model for recognition. Measured on the 235 reference photos
+// (leave-one-out): DINOv2-small 71% exact vs SigLIP-base 55%, and faster.
+const IMG_MODEL = "Xenova/dinov2-small";
+const EMB_DIM = 384; // DINOv2-small CLS embedding size
+// Nearest neighbour (k=1) measured best; candidates = next distinct species.
+const SIM_OK = 0.65; // ≥ 0.65: 88% correct on the reference photos ("sûre")
 
 /** Cosine similarity of two L2-normalized vectors = dot product. */
 function dot(a: Float32Array, b: Float32Array): number {
@@ -609,17 +611,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
     setBusy("Chargement du modèle image (1ʳᵉ fois, ~30-60 s)…");
     const { pipeline, env } = await import("@xenova/transformers");
     (env as any).allowLocalModels = false;
-    extractorRef.current = await pipeline("image-feature-extraction", SIGLIP_MODEL);
+    extractorRef.current = await pipeline("image-feature-extraction", IMG_MODEL);
     return extractorRef.current;
   }
 
   async function embedUrl(url: string): Promise<Float32Array> {
     const extractor = await getExtractor();
-    // pool: the 768-d image embedding (pooler_output). Without it the pipeline
-    // returns last_hidden_state (196 patches × 768), which compares pixel
-    // layout instead of content and made recognition mostly wrong.
-    const out = await extractor(url, { pool: true });
-    const v = Float32Array.from(out.data as Float32Array);
+    // Image embedding = the CLS token (first row of last_hidden_state). Using
+    // the whole flattened output compared pixel layout, not content.
+    const out = await extractor(url);
+    const D = out.dims[out.dims.length - 1];
+    const v = Float32Array.from((out.data as Float32Array).subarray(0, D));
     let norm = 0;
     for (const x of v) norm += x * x;
     norm = Math.sqrt(norm) || 1;
@@ -1020,22 +1022,19 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           tImg += performance.now() - t0;
           const sims = refs
             .map((r) => ({ species: r.species, sim: dot(vec, r.vec) }))
-            .sort((a, b) => b.sim - a.sim)
-            .slice(0, KNN_K);
-          const score = new Map<string, number>();
-          for (const s of sims) score.set(s.species, (score.get(s.species) || 0) + s.sim);
-          const ranked = [...score.entries()].sort((a, b) => b[1] - a[1]);
-          const best = ranked[0];
+            .sort((a, b) => b.sim - a.sim);
+          // Distinct species in order of their closest photo (k=1 first).
+          const ranked = [...new Set(sims.map((x) => x.species))];
           const topSim = sims[0]?.sim ?? 0;
 
           // Low confidence → offer the top-3 distinct candidates to pick from.
           if (topSim < SIM_OK) {
-            cands.set(p.id, ranked.slice(0, 3).map(([s]) => s));
+            cands.set(p.id, ranked.slice(0, 3));
           } else {
             cands.delete(p.id);
           }
 
-          let chosen = best ? best[0] : "";
+          let chosen = ranked[0] || "";
           // Very low similarity → ask Gemini; keep its answer if valid.
           if (topSim < 0.5 && !geminiOff) {
             const g0 = performance.now();

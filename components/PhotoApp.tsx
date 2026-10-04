@@ -445,6 +445,8 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const [context, setContext] = useState<Map<string, string>>(new Map());
   const [q, setQ] = useState("");
   const [driveQ, setDriveQ] = useState("");
+  // Every species in myphotos.json (name -> photo count), for search suggestions.
+  const [driveSpecies, setDriveSpecies] = useState<Map<string, number>>(new Map());
   const [word, setWord] = useState<string | null>(null);
   const [sort, setSort] = useState("date-desc");
   const [nameFilter, setNameFilter] = useState<"all" | "named" | "unnamed">("all");
@@ -655,6 +657,17 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
           .map(([name, count]) => ({ name, count }))
           .sort((a, b) => a.name.localeCompare(b.name, "he")),
       );
+      const sp = new Map<string, number>();
+      if (st.indexFileId) {
+        const r = await driveFetch(`${DRIVE}/${st.indexFileId}?alt=media`);
+        const arr = r.ok ? await r.json().catch(() => []) : [];
+        if (Array.isArray(arr))
+          for (const m of arr) {
+            const t = String(m?.species || "").trim();
+            if (t) sp.set(t, (sp.get(t) || 0) + 1);
+          }
+      }
+      setDriveSpecies(sp);
     } catch {
       /* ignore */
     }
@@ -2215,13 +2228,13 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
   const namedCount = albumScoped.length - unnamedCount;
 
   const uniqueSpecies = useMemo(() => {
-    const set = new Set<string>();
+    const set = new Set<string>(driveSpecies.keys()); // all species known in Drive
     for (const v of species.values()) {
       const t = v.trim();
       if (t) set.add(t);
     }
     return [...set].sort((a, b) => a.localeCompare(b, "he"));
-  }, [species]);
+  }, [species, driveSpecies]);
 
   // Species dropdown options (name + count), scoped to the selected album.
   const speciesOptions = useMemo(() => {
@@ -2379,6 +2392,13 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
 
   return (
     <>
+      <datalist id="search-species-list">
+        {[...driveSpecies.entries()]
+          .sort((a, b) => a[0].localeCompare(b[0], "he"))
+          .map(([s, n]) => (
+            <option key={s} value={s} label={`${s} (${n})`} />
+          ))}
+      </datalist>
       {driveDown && (
         <div className="notice notice-error busy-sticky" style={{ top: 12, bottom: "auto" }}>
           ⚠️ Connexion à Google Drive perdue.{" "}
@@ -2474,6 +2494,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
               type="search"
               dir="auto"
               placeholder="🔎 Chercher une photo (nom, description, lieu…)"
+              list="search-species-list"
               value={driveQ}
               onChange={(e) => setDriveQ(e.target.value)}
               onKeyDown={(e) => {
@@ -2723,6 +2744,7 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
             <input
               type="search"
               placeholder="Rechercher (nom, description, lieu…)"
+              list="search-species-list"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />

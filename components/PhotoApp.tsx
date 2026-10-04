@@ -1074,6 +1074,38 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
       return s;
     });
   }
+  // Name of what « Déclasser » acts on: the filtered album, or the only one loaded.
+  const scopeLabel = () =>
+    albumFilter !== "(tous)"
+      ? `« ${albumFilter} »`
+      : albums.length === 1
+        ? `« ${albums[0][0]} »`
+        : "tous les albums affichés";
+
+  /**
+   * Clear the species of every photo in the current album scope (locally,
+   * queued); written to Drive on « 💾 Save ».
+   */
+  function unclassifyScoped() {
+    const ids = albumScoped.filter((p) => (species.get(p.id) || "").trim()).map((p) => p.id);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Retirer le nom de ${ids.length} photo(s) de ${scopeLabel()} ?`)) return;
+    const sp = new Map(species);
+    const conf = new Map(aiConf);
+    const cands = new Map(aiCands);
+    for (const id of ids) {
+      sp.set(id, "");
+      conf.delete(id);
+      cands.delete(id);
+      persistEdit(id, "", context.get(id) || "");
+    }
+    addPending({ type: "name", ids, species: "" });
+    setSpecies(sp);
+    setAiConf(conf);
+    setAiCands(cands);
+    setOkMsg(`🧹 ${ids.length} photo(s) déclassée(s) — cliquez « 💾 Save » pour enregistrer dans Drive.`);
+  }
+
   /** Name the selection locally; written to Drive on « 💾 Save ». */
   function applyGroupName() {
     const name = groupName.trim();
@@ -2864,6 +2896,16 @@ export default function PhotoApp({ accessToken }: { accessToken?: string }) {
                 title="Reconnaître les non classés par similarité d'image (secours Gemini)"
               >
                 🖼️ Reconnaître par image ({unnamedCount})
+              </button>
+            )}
+            {namedCount > 0 && (
+              <button
+                className="btn btn-danger-outline btn-sm"
+                onClick={unclassifyScoped}
+                disabled={!!busy}
+                title="Retirer le nom de toutes les photos de cet album (enregistré avec « 💾 Save »)"
+              >
+                🧹 Déclasser {scopeLabel()} ({namedCount})
               </button>
             )}
           </div>
